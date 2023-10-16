@@ -1,0 +1,17 @@
+numpy
+datasets==2.10.0
+sentencepiece
+evaluate==0.4.0
+rouge_score==0.1.2
+sentence-transformers==2.2.2
+
+git+https://github.com/huggingface/transformers.git@057e1d74733f52817dc05b673a340b4e3ebea08c
+git+https://github.com/huggingface/peft.git@b21559e042555a8370f4b3cf1ad581c45291cf15
+accelerate==0.18.0
+bitsandbytes==0.37.2
+appdirs==1.4.4
+fire==0.5.0
+pydantic==1.10.6
+pytorch-lightning==2.0.0
+tqdm
+tensorboard==2.12.2
