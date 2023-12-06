@@ -100,6 +100,30 @@ Note that you may get slightly different scores than in our paper. Different com
 Also, the model may behave in a non-deterministic manner even with the same random seed.
 
 
+### Using pre-trained models
+
+Make sure you have installed following packages:
+
+```bash
+pip install git+https://github.com/facebookresearch/detectron2.git@v0.5 datasets==2.10.0 nltk==3.8.1 python-doctr==0.6.0 pymupdf==1.21.1 pytesseract==0.3.10 Pillow==9.4.0 imutils==0.5.4 rapidfuzz==2.13.7
+```
+
+The pre-trained models are available [here](https://huggingface.co/climate-nlp).
+You can directly download and use the models as follows:
+
+```bash
+python src/demo.py \
+  --pdf <your pdf file path> \
+  --max_pages 100 \
+  --model_name_detect_evidence "climate-nlp/longformer-large-4096-1-detect-evidence" \
+  --model_name_classify_query "climate-nlp/longformer-large-4096-2-classify-query" \
+  --model_name_classify_stance "climate-nlp/longformer-large-4096-3-classify-stance"
+```
+
+The output result of the main task will be saved at the same directory with a jsonline file.
+
+
+
 ### License
 
 Some contents used in this project are drawn from external projects:
