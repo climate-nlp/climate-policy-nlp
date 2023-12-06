@@ -100,7 +100,7 @@ Note that you may get slightly different scores than in our paper. Different com
 Also, the model may behave in a non-deterministic manner even with the same random seed.
 
 
-### Using pre-trained models
+### Using trained models
 
 Make sure you have installed following packages:
 
@@ -108,7 +108,7 @@ Make sure you have installed following packages:
 pip install git+https://github.com/facebookresearch/detectron2.git@v0.5 datasets==2.10.0 nltk==3.8.1 python-doctr==0.6.0 pymupdf==1.21.1 pytesseract==0.3.10 Pillow==9.4.0 imutils==0.5.4 rapidfuzz==2.13.7
 ```
 
-The pre-trained models are available [here](https://huggingface.co/climate-nlp).
+The trained models are available [here](https://huggingface.co/climate-nlp).
 You can directly download and use the models as follows:
 
 ```bash
