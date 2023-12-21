@@ -9,7 +9,8 @@ import json
 
 import numpy as np
 import datasets
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer
+from transformers import pipeline
+from transformers.pipelines.pt_utils import KeyDataset
 import torch
 import nltk
 import fitz
@@ -328,7 +329,7 @@ def read_pdf(pdf_path: str, max_pages: int) -> List[Dict]:
     return data_points
 
 
-def detect_evidence(data_points: List[Dict], model, tokenizer) -> List[Dict]:
+def detect_evidence(data_points: List[Dict], pipe, batch_size: int) -> List[Dict]:
     doc_id_2_sentences = {d['document_id']: d['sentences'] for d in data_points}
 
     prepro_data_points = []
@@ -338,56 +339,50 @@ def detect_evidence(data_points: List[Dict], model, tokenizer) -> List[Dict]:
         for page_idx in page_indices:
             page_sentences = [s for s in data_point['sentences'] if s['page_idx'] == page_idx]
 
-            page_text = f' {tokenizer.sep_token} '.join(
+            page_text = f' {pipe.tokenizer.sep_token} '.join(
                 [s['text'] for s in page_sentences]
             )
 
             prepro_data_points.append({
                 'document_id': data_point['document_id'],
                 'page_idx': page_idx,
-                'label': 'none',  # placeholder
-                'sentence1': page_text,
+                'text': page_text,
             })
 
     predict_dataset = datasets.Dataset.from_list(prepro_data_points)
 
-    def preprocess_function(examples):
-        args = ((examples['sentence1'],))
-        result = tokenizer(*args, padding="max_length", max_length=tokenizer.model_max_length, truncation=True)
-        result["label"] = [0 for _ in examples["label"]]  # placeholder
-        return result
+    scores = []
+    for out in pipe(
+            KeyDataset(predict_dataset, "text"),
+            batch_size=batch_size,
+            truncation="only_first",
+            top_k=None,
+    ):
+        score = next(v for v in out if v['label'] == 'evidence')['score']
+        scores.append(score)
 
-    predict_dataset = predict_dataset.map(
-        preprocess_function,
-        load_from_cache_file=False,
-        batched=True,
-        desc="Running tokenizer on dataset",
-    )
-
-    trainer = Trainer(model=model, tokenizer=tokenizer)
-    predictions = trainer.predict(predict_dataset, metric_key_prefix="predict").predictions
-    evidence_scores = torch.softmax(
-        torch.tensor(predictions).float(), dim=1
-    ).numpy()[:, model.config.label2id['evidence']].tolist()
+    assert len(scores) == len(predict_dataset)
+    predict_dataset = predict_dataset.add_column('score', scores)
 
     document_id_2_candidates = dict()
-    for index, score in enumerate(evidence_scores):
-        document_id = predict_dataset[index]['document_id']
-        page_idx = predict_dataset[index]['page_idx']
+    for predict_data in predict_dataset:
+        document_id = predict_data['document_id']
 
         if document_id not in document_id_2_candidates:
             document_id_2_candidates[document_id] = []
         document_id_2_candidates[document_id].append({
             "query": 'energy_transition_&_zero_carbon_technologies',  # Dummy!
             "stance": 'strongly_supporting',  # Dummy!
-            "page_indices": [page_idx],
-            "evidence_prob": score  # For debugging
+            "page_indices": [predict_data['page_idx']],
+            "evidence_prob": predict_data['score']
         })
 
     predicted_data_points = []
     for document_id, output_candidates in document_id_2_candidates.items():
         outputs = [o for o in output_candidates if o['evidence_prob'] >= 0.5]
 
+        # Workaround for the lobbymap data
+        # If we do not find any evidence pages, we find the highest scored page as the evidence page
         min_prediction_per_doc = 1
         if min_prediction_per_doc > 0 and len(outputs) < min_prediction_per_doc:
             output_candidates = sorted(
@@ -413,75 +408,52 @@ def detect_evidence(data_points: List[Dict], model, tokenizer) -> List[Dict]:
     return predicted_data_points
 
 
-def classify_query(data_points: List[Dict], model, tokenizer) -> List[Dict]:
+def classify_query(data_points: List[Dict], pipe, batch_size: int) -> List[Dict]:
     doc_id_2_sentences = {d['document_id']: d['sentences'] for d in data_points}
 
     prepro_data_points = []
     for data_point in data_points:
-        page_indices = sorted(list(set([s['page_idx'] for s in data_point['sentences']])))
+        for evidence in data_point['evidences']:
+            assert len(evidence['page_indices']) == 1
+            page_idx = evidence['page_indices'][0]
 
-        for page_idx in page_indices:
             page_sentences = [s for s in data_point['sentences'] if s['page_idx'] == page_idx]
 
-            page_text = f' {tokenizer.sep_token} '.join(
+            page_text = f' {pipe.tokenizer.sep_token} '.join(
                 [s['text'] for s in page_sentences]
             )
-
-            page_queries = set()
-            for evidence in data_point['evidences']:
-                if page_idx in evidence['page_indices']:
-                    page_queries.add(evidence['query'])
-
-            if not page_queries:
-                continue
 
             prepro_data_points.append({
                 'document_id': data_point['document_id'],
                 'page_idx': page_idx,
-                'label': sorted(list(page_queries)),  # placeholder
-                'sentence1': page_text,
+                'text': page_text,
+                'evidence_prob': evidence['evidence_prob'],
             })
 
     predict_dataset = datasets.Dataset.from_list(prepro_data_points)
 
-    def preprocess_function(examples):
-        args = ((examples['sentence1'],))
-        result = tokenizer(*args, padding="max_length", max_length=tokenizer.model_max_length, truncation=True)
+    labels_list = []
+    for out in pipe(
+            KeyDataset(predict_dataset, "text"),
+            batch_size=batch_size,
+            truncation="only_first",
+            top_k=None,
+    ):
+        labels = [o['label'] for o in out if o['score'] >= 0.5]
+        if labels:
+            labels_list.append(labels)
+        else:
+            labels = [max(out, key=lambda o: o['score'])['label']]
+            labels_list.append(labels)
 
-        # Map labels to IDs
-        label_logits = []
-        for _page_queries in examples["label"]:
-            label_logit = [0. for _ in model.config.label2id.keys()]
-            for page_query in _page_queries:
-                label_logit[model.config.label2id[page_query]] = 1.0  # placeholder
-            label_logits.append(label_logit)
-
-        result["label"] = label_logits
-        return result
-
-    predict_dataset = predict_dataset.map(
-        preprocess_function,
-        load_from_cache_file=False,
-        batched=True,
-        desc="Running tokenizer on dataset",
-    )
-
-    trainer = Trainer(model=model, tokenizer=tokenizer)
-    predictions_logits = trainer.predict(predict_dataset, metric_key_prefix="predict").predictions
-    predictions = [
-        [model.config.id2label[i] for i in np.where(pl >= 0)[0]]
-        for pl in predictions_logits
-    ]
-    predictions = [
-        p if p else [model.config.id2label[np.argmax(pl)]]
-        for pl, p in zip(predictions_logits, predictions)
-    ]
+    assert len(predict_dataset) == len(labels_list)
 
     document_id2output = dict()
-    for index, query_labels in enumerate(predictions):
+    for index, query_labels in enumerate(labels_list):
 
         document_id = predict_dataset[index]['document_id']
         page_idx = predict_dataset[index]['page_idx']
+        evidence_prob = predict_dataset[index]['evidence_prob']
 
         if document_id not in document_id2output:
             document_id2output[document_id] = []
@@ -489,8 +461,8 @@ def classify_query(data_points: List[Dict], model, tokenizer) -> List[Dict]:
         for query_label in query_labels:
             document_id2output[document_id].append({
                 "query": query_label,
-                "stance": 'strongly_supporting',  # Dummy!
                 "page_indices": [page_idx],
+                "evidence_prob": evidence_prob,
             })
 
     predicted_data_points = []
@@ -509,69 +481,54 @@ def classify_query(data_points: List[Dict], model, tokenizer) -> List[Dict]:
     return predicted_data_points
 
 
-def classify_stance(data_points: List[Dict], model, tokenizer) -> List[Dict]:
+def classify_stance(data_points: List[Dict], pipe, batch_size: int ) -> List[Dict]:
     doc_id_2_sentences = {d['document_id']: d['sentences'] for d in data_points}
 
     prepro_data_points = []
     for data_point in data_points:
-        page_indices = sorted(list(set([s['page_idx'] for s in data_point['sentences']])))
+        for evidence in data_point['evidences']:
+            assert len(evidence['page_indices']) == 1
+            page_idx = evidence['page_indices'][0]
 
-        for page_idx in page_indices:
             page_sentences = [s for s in data_point['sentences'] if s['page_idx'] == page_idx]
-
-            page_text = f' {tokenizer.sep_token} '.join(
+            page_text = f' {pipe.tokenizer.sep_token} '.join(
                 [s['text'] for s in page_sentences]
             )
+            query = evidence['query']
 
-            for evidence in data_point['evidences']:
-                if page_idx in evidence['page_indices']:
-                    stance = evidence['stance']
-                    query = evidence['query']
-
-                    prepro_data_points.append({
-                        'document_id': data_point['document_id'],
-                        'page_idx': page_idx,
-                        'query': query,
-                        'label': stance,  # placeholder
-                        'sentence1': f"{query} {tokenizer.sep_token} {page_text}",
-                    })
+            prepro_data_points.append({
+                'document_id': data_point['document_id'],
+                'page_idx': page_idx,
+                'query': query,
+                'text': f"{query} {pipe.tokenizer.sep_token} {page_text}",
+                'evidence_prob': evidence['evidence_prob']
+            })
 
     predict_dataset = datasets.Dataset.from_list(prepro_data_points)
 
-    def preprocess_function(examples):
-        args = ((examples['sentence1'],))
-        result = tokenizer(*args, padding="max_length", max_length=tokenizer.model_max_length, truncation=True)
+    labels = []
+    for out in pipe(
+            KeyDataset(predict_dataset, "text"),
+            batch_size=batch_size,
+            truncation="only_first",
+    ):
+        labels.append(out['label'])
 
-        # Map labels to IDs
-        result["label"] = [0 for _ in examples["label"]]  # placeholder
-        return result
-
-    predict_dataset = predict_dataset.map(
-        preprocess_function,
-        load_from_cache_file=False,
-        batched=True,
-        desc="Running tokenizer on dataset",
-    )
-
-    trainer = Trainer(model=model, tokenizer=tokenizer)
-    predictions = trainer.predict(predict_dataset, metric_key_prefix="predict").predictions
-    predictions = np.argmax(predictions, axis=1)
+    assert len(labels) == len(predict_dataset)
+    predict_dataset = predict_dataset.add_column('label', labels)
 
     document_id2output = dict()
-    for index, item in enumerate(predictions):
-        stance = model.config.id2label[item]
-
-        document_id = predict_dataset[index]['document_id']
-        page_idx = predict_dataset[index]['page_idx']
-        query = predict_dataset[index]['query']
+    for predict_data in predict_dataset:
+        document_id = predict_data['document_id']
 
         if document_id not in document_id2output:
             document_id2output[document_id] = []
 
         document_id2output[document_id].append({
-            "query": query,
-            "stance": stance,
-            "page_indices": [page_idx],
+            "query": predict_data['query'],
+            "stance": predict_data['label'],
+            "page_indices": [predict_data['page_idx']],
+            #"evidence_prob": predict_data['evidence_prob'],
         })
 
     predicted_data_points = []
@@ -624,26 +581,35 @@ def post_process(data_points: List[Dict]) -> List[Dict]:
 def main(args):
     print(f'Your setting: {args}')
 
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f'Using device "{device}"')
+
     # Load input pdf file
     data_points = read_pdf(pdf_path=args.pdf, max_pages=args.max_pages)
 
     # 1. Detect evidence
     print('Detecting evidence')
-    model = AutoModelForSequenceClassification.from_pretrained(args.model_name_detect_evidence)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_detect_evidence)
-    data_points = detect_evidence(data_points=data_points, model=model, tokenizer=tokenizer)
+    data_points = detect_evidence(
+        data_points=data_points,
+        pipe=pipeline("text-classification", model=args.model_name_detect_evidence, device=device),
+        batch_size=args.batch_size
+    )
 
     # 2. Classify query
     print('Classifying query')
-    model = AutoModelForSequenceClassification.from_pretrained(args.model_name_classify_query)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_classify_query)
-    data_points = classify_query(data_points=data_points, model=model, tokenizer=tokenizer)
+    data_points = classify_query(
+        data_points=data_points,
+        pipe=pipeline("text-classification", model=args.model_name_classify_query, device=device),
+        batch_size=args.batch_size
+    )
 
     # 3. Classify stance
     print('Classifying stance')
-    model = AutoModelForSequenceClassification.from_pretrained(args.model_name_classify_stance)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_classify_stance)
-    data_points = classify_stance(data_points=data_points, model=model, tokenizer=tokenizer)
+    data_points = classify_stance(
+        data_points=data_points,
+        pipe=pipeline("text-classification", model=args.model_name_classify_stance, device=device),
+        batch_size=args.batch_size
+    )
 
     # Post-process
     data_points = post_process(data_points=data_points)
@@ -673,6 +639,12 @@ if __name__ == '__main__':
         type=int,
         default=100,
         help="The maximum pages to read",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=4,
+        help="The batch size",
     )
     parser.add_argument(
         "--model_name_detect_evidence",

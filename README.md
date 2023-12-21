@@ -115,12 +115,13 @@ You can directly download and use the models as follows:
 python src/demo.py \
   --pdf <your pdf file path> \
   --max_pages 100 \
+  --batch_size 4 \
   --model_name_detect_evidence "climate-nlp/longformer-large-4096-1-detect-evidence" \
   --model_name_classify_query "climate-nlp/longformer-large-4096-2-classify-query" \
   --model_name_classify_stance "climate-nlp/longformer-large-4096-3-classify-stance"
 ```
 
-The output result of the main task will be saved at the same directory with a jsonline file.
+The output result of the main task will be saved at the directory of the input PDF file.
 
 
 
