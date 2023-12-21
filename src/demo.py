@@ -581,7 +581,7 @@ def post_process(data_points: List[Dict]) -> List[Dict]:
 def main(args):
     print(f'Your setting: {args}')
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = 0 if torch.cuda.is_available() else -1
     print(f'Using device "{device}"')
 
     # Load input pdf file
